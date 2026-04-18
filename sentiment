@@ -1,0 +1,213 @@
+"""
+Sentiment Analysis Module
+"""
+
+import re
+from typing import Dict, List, Tuple
+
+
+
+POSITIVE_WORDS = {
+    "better", "improved", "recovering", "healthy", "well", "good", "great",
+    "excellent", "hopeful", "relieved", "comfortable", "manageable", "cured",
+    "healed", "effective", "successful", "positive", "stable", "controlled",
+    "responding", "progressing", "thankful", "grateful", "reassured", "calm",
+    "fine", "okay", "optimistic", "confident", "happy", "relieved"
+}
+
+NEGATIVE_WORDS = {
+    "pain", "painful", "hurt", "hurting", "suffering", "worse", "terrible",
+    "horrible", "awful", "scared", "frightened", "worried", "anxious", "panic",
+    "severe", "dangerous", "critical", "serious", "bad", "sick", "ill",
+    "desperate", "hopeless", "dying", "dead", "unbearable", "miserable",
+    "depressed", "sad", "crying", "emergency", "urgent", "help", "please",
+    "difficult", "hard", "struggling", "weak", "exhausted", "dying", "fear",
+    "afraid", "terrified", "distressed", "agony", "crisis"
+}
+
+INTENSIFIERS = {"very", "extremely", "really", "so", "quite", "absolutely", "incredibly"}
+NEGATIONS = {"not", "no", "never", "don't", "doesn't", "isn't", "aren't", "won't", "cannot"}
+
+URGENCY_PATTERNS = [
+    r'\b(emergency|urgent|911|ambulance|help me|dying|can\'t breathe|chest pain)\b',
+    r'\b(severe|extreme|unbearable)\s+(pain|difficulty|discomfort)\b',
+    r'\b(suicid|harm myself|end my life)\b'
+]
+
+EMOTIONAL_PATTERNS = {
+    "fear": r'\b(scared|afraid|terrified|frightened|worried|anxious|fear|dread)\b',
+    "sadness": r'\b(sad|cry|crying|depressed|hopeless|miserable|lonely|grief)\b',
+    "anger": r'\b(angry|frustrated|annoyed|furious|upset|mad)\b',
+    "relief": r'\b(relieved|better|improved|thankful|grateful|hopeful)\b',
+    "confusion": r'\b(confused|unsure|don\'t understand|lost|overwhelmed)\b',
+}
+
+
+
+class SentimentAnalyzer:
+    """
+    Multi-level sentiment analysis:
+    1. Rule-based lexicon scoring (always available)
+    2. TextBlob (if installed)
+    3. Transformers (if installed and GPU available)
+    """
+
+    def __init__(self):
+        self.transformer_model = None
+        self._try_load_transformer()
+
+    def _try_load_transformer(self):
+        """Attempt to load a lightweight transformer sentiment model."""
+        try:
+            from transformers import pipeline
+            self.transformer_model = pipeline(
+                "sentiment-analysis",
+                model="distilbert-base-uncased-finetuned-sst-2-english",
+                truncation=True,
+                max_length=512
+            )
+        except Exception:
+            self.transformer_model = None
+
+    def analyze(self, text: str) -> Dict:
+        """
+        Perform multi-faceted sentiment analysis.
+        Returns: {label, score, emotions, is_urgent, confidence_source}
+        """
+        # Check urgency first
+        is_urgent = self._check_urgency(text)
+
+        # Detect emotions
+        emotions = self._detect_emotions(text)
+
+        # Sentiment scoring
+        if self.transformer_model:
+            result = self._transformer_sentiment(text)
+        else:
+            result = self._lexicon_sentiment(text)
+
+        # Override: urgent + negative words → always negative
+        if is_urgent and result["label"] != "negative":
+            result["label"] = "negative"
+            result["score"] = max(result["score"], 0.85)
+
+        return {
+            **result,
+            "emotions": emotions,
+            "is_urgent": is_urgent,
+            "raw_text_length": len(text),
+            "word_count": len(text.split())
+        }
+
+    def _lexicon_sentiment(self, text: str) -> Dict:
+        """Score sentiment using medical lexicon."""
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        pos_score = 0.0
+        neg_score = 0.0
+        negate = False
+
+        for i, token in enumerate(tokens):
+            if token in NEGATIONS:
+                negate = True
+                continue
+
+            multiplier = 1.5 if (i > 0 and tokens[i - 1] in INTENSIFIERS) else 1.0
+
+            if token in POSITIVE_WORDS:
+                if negate:
+                    neg_score += multiplier
+                else:
+                    pos_score += multiplier
+            elif token in NEGATIVE_WORDS:
+                if negate:
+                    pos_score += multiplier * 0.5
+                else:
+                    neg_score += multiplier
+
+            negate = False  # reset after one word
+
+        total = pos_score + neg_score
+        if total == 0:
+            return {"label": "neutral", "score": 0.5, "confidence_source": "lexicon"}
+
+        pos_ratio = pos_score / total
+        if pos_ratio > 0.6:
+            return {"label": "positive", "score": min(0.5 + pos_ratio * 0.5, 0.99),
+                    "confidence_source": "lexicon"}
+        elif pos_ratio < 0.4:
+            neg_ratio = 1 - pos_ratio
+            return {"label": "negative", "score": min(0.5 + neg_ratio * 0.5, 0.99),
+                    "confidence_source": "lexicon"}
+        else:
+            return {"label": "neutral", "score": 0.5, "confidence_source": "lexicon"}
+
+    def _transformer_sentiment(self, text: str) -> Dict:
+        """Use transformer model for sentiment."""
+        try:
+            result = self.transformer_model(text[:512])[0]
+            label_map = {"POSITIVE": "positive", "NEGATIVE": "negative", "NEUTRAL": "neutral"}
+            label = label_map.get(result["label"].upper(), "neutral")
+            return {
+                "label": label,
+                "score": result["score"],
+                "confidence_source": "transformer"
+            }
+        except Exception:
+            return self._lexicon_sentiment(text)
+
+    def _check_urgency(self, text: str) -> bool:
+        """Check for medical urgency indicators."""
+        text_lower = text.lower()
+        for pattern in URGENCY_PATTERNS:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                return True
+        return False
+
+    def _detect_emotions(self, text: str) -> List[str]:
+        """Detect specific emotions in text."""
+        detected = []
+        text_lower = text.lower()
+        for emotion, pattern in EMOTIONAL_PATTERNS.items():
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                detected.append(emotion)
+        return detected
+
+    def batch_analyze(self, texts: List[str]) -> List[Dict]:
+        """Analyze multiple texts."""
+        return [self.analyze(t) for t in texts]
+
+    def get_response_modifier(self, sentiment: Dict) -> str:
+        """
+        Return a response modification hint based on sentiment.
+        Used by the chatbot to adjust tone.
+        """
+        label = sentiment.get("label", "neutral")
+        emotions = sentiment.get("emotions", [])
+        is_urgent = sentiment.get("is_urgent", False)
+
+        if is_urgent:
+            return "URGENT: Prioritize safety information and emergency resources."
+
+        modifiers = {
+            "negative": {
+                "fear": "Be calming and reassuring. Provide clear, factual information to reduce anxiety.",
+                "sadness": "Be empathetic and supportive. Acknowledge their feelings before providing information.",
+                "anger": "Stay calm and professional. Acknowledge their frustration without being defensive.",
+                "default": "Be supportive and understanding. Offer clear information and resources."
+            },
+            "positive": {
+                "relief": "Reinforce positive steps taken. Continue with helpful, encouraging information.",
+                "default": "Maintain a warm, informative tone."
+            },
+            "neutral": {
+                "confusion": "Be clear and structured. Use simple language and step-by-step explanations.",
+                "default": "Provide clear, professional, factual information."
+            }
+        }
+
+        category = modifiers.get(label, modifiers["neutral"])
+        for emotion in emotions:
+            if emotion in category:
+                return category[emotion]
+        return category.get("default", "Provide helpful, professional medical information.")
+
