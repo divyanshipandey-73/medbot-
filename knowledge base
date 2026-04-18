@@ -1,0 +1,367 @@
+"""
+Dynamic Knowledge Base Updater
+- Fetches new content from multiple medical sources
+- Deduplicates and validates new entries
+- Manages update scheduling and logging
+"""
+
+import json
+import re
+import time
+import hashlib
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+
+
+class PubMedFetcher:
+    """Fetch recent articles from PubMed via E-utilities API (free, no key needed)."""
+
+    BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    SEARCH_TERMS = [
+        "clinical guidelines treatment",
+        "disease symptoms diagnosis",
+        "drug therapy adverse effects",
+        "COVID-19 treatment 2024",
+        "cancer immunotherapy"
+    ]
+
+    def fetch(self, max_articles: int = 10) -> List[Dict]:
+        """Fetch recent PubMed articles."""
+        import urllib.request
+        import urllib.parse
+
+        articles = []
+        for term in self.SEARCH_TERMS[:2]:
+            try:
+                # Search for IDs
+                search_url = (
+                    f"{self.BASE_URL}/esearch.fcgi?"
+                    + urllib.parse.urlencode({
+                        "db": "pubmed",
+                        "term": term,
+                        "retmax": 3,
+                        "retmode": "json",
+                        "sort": "relevance",
+                        "datetype": "pdat",
+                        "reldate": 365  # last year
+                    })
+                )
+                with urllib.request.urlopen(search_url, timeout=8) as r:
+                    search_data = json.loads(r.read())
+
+                ids = search_data.get("esearchresult", {}).get("idlist", [])
+                if not ids:
+                    continue
+
+                # Fetch summaries
+                summary_url = (
+                    f"{self.BASE_URL}/esummary.fcgi?"
+                    + urllib.parse.urlencode({
+                        "db": "pubmed",
+                        "id": ",".join(ids),
+                        "retmode": "json"
+                    })
+                )
+                with urllib.request.urlopen(summary_url, timeout=8) as r:
+                    summary_data = json.loads(r.read())
+
+                for uid in ids:
+                    doc_data = summary_data.get("result", {}).get(uid, {})
+                    if doc_data:
+                        title = doc_data.get("title", "")
+                        authors = doc_data.get("authors", [])
+                        pubdate = doc_data.get("pubdate", "")
+                        source = doc_data.get("source", "PubMed")
+
+                        articles.append({
+                            "id": f"pubmed_{uid}",
+                            "source": "PubMed",
+                            "category": self._classify(title),
+                            "question": f"What does research say about: {title[:100]}?",
+                            "answer": (
+                                f"Recent research published in {source} ({pubdate}) by "
+                                f"{authors[0].get('name', 'et al.') if authors else 'researchers'} "
+                                f"investigated: {title}. This represents current evidence in the field. "
+                                f"Consult the full article for detailed findings and methodology."
+                            ),
+                            "metadata": {
+                                "pmid": uid,
+                                "journal": source,
+                                "pubdate": pubdate,
+                                "url": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/"
+                            }
+                        })
+            except Exception:
+                continue  # Network unavailable
+
+        return articles[:max_articles]
+
+    def _classify(self, title: str) -> str:
+        """Classify article by title keywords."""
+        title_lower = title.lower()
+        categories = {
+            "Oncology": ["cancer", "tumor", "malignant", "chemotherapy", "immunotherapy"],
+            "Cardiology": ["heart", "cardiac", "cardiovascular", "hypertension"],
+            "Neurology": ["brain", "neurological", "alzheimer", "parkinson", "stroke"],
+            "Infectious Disease": ["infection", "virus", "bacterial", "covid", "pathogen"],
+            "Pharmacology": ["drug", "medication", "therapy", "treatment", "dose"],
+            "Diabetes": ["diabetes", "insulin", "glucose", "glycemic"],
+        }
+        for category, keywords in categories.items():
+            if any(kw in title_lower for kw in keywords):
+                return category
+        return "General Medicine"
+
+
+class MedQuADFetcher:
+    """
+    Simulates fetching from MedQuAD dataset.
+    In production: load from local XML files from https://github.com/abachaa/MedQuAD
+    """
+
+    SIMULATED_QA = [
+        {
+            "source": "MedQuAD-NCI",
+            "category": "Oncology",
+            "question": "What are the genetic risk factors for breast cancer?",
+            "answer": (
+                "BRCA1 and BRCA2 gene mutations significantly increase breast cancer risk "
+                "(up to 72% lifetime risk for BRCA1). Other genes: TP53, PALB2, CHEK2, ATM. "
+                "Genetic counseling and testing recommended for those with family history. "
+                "Risk-reduction strategies include enhanced screening (MRI + mammography), "
+                "chemoprevention (tamoxifen, aromatase inhibitors), and prophylactic surgery."
+            )
+        },
+        {
+            "source": "MedQuAD-NIDDK",
+            "category": "Gastroenterology",
+            "question": "What is Crohn's disease?",
+            "answer": (
+                "Crohn's disease is a chronic inflammatory bowel disease (IBD) affecting any "
+                "part of the GI tract (most commonly the ileum and colon). Symptoms: abdominal "
+                "pain, diarrhea, rectal bleeding, weight loss, fatigue. Caused by immune "
+                "system dysfunction, genetic factors, and gut microbiome changes. Treatment: "
+                "aminosalicylates, corticosteroids, immunomodulators, biologics (anti-TNF, "
+                "anti-integrin), and surgery for complications."
+            )
+        },
+        {
+            "source": "MedQuAD-NINDS",
+            "category": "Neurology",
+            "question": "What is multiple sclerosis?",
+            "answer": (
+                "Multiple sclerosis (MS) is an autoimmune disease where the immune system "
+                "attacks the myelin sheath protecting nerve fibers, causing communication "
+                "disruptions between brain and body. Types: relapsing-remitting (most common), "
+                "primary progressive, secondary progressive. Symptoms vary by lesion location: "
+                "fatigue, vision problems, numbness, weakness, coordination issues. "
+                "DMTs (disease-modifying therapies) reduce relapse rates and slow progression."
+            )
+        },
+        {
+            "source": "MedQuAD-NHLBI",
+            "category": "Pulmonology",
+            "question": "What is COPD?",
+            "answer": (
+                "Chronic obstructive pulmonary disease (COPD) is a progressive lung disease "
+                "causing airflow limitation. Includes emphysema (alveolar damage) and chronic "
+                "bronchitis (airway inflammation). Main cause: long-term smoking (85%). "
+                "Symptoms: progressive breathlessness, chronic cough, wheeze, frequent "
+                "respiratory infections. Diagnosis: spirometry (FEV1/FVC ratio <0.70). "
+                "Treatment: smoking cessation, bronchodilators (LABA, LAMA), inhaled "
+                "corticosteroids, pulmonary rehabilitation, oxygen therapy."
+            )
+        },
+    ]
+
+    def fetch(self) -> List[Dict]:
+        """Return simulated MedQuAD entries."""
+        docs = []
+        for i, qa in enumerate(self.SIMULATED_QA):
+            docs.append({
+                "id": f"medquad_{i:04d}_{hashlib.md5(qa['question'].encode()).hexdigest()[:8]}",
+                **qa,
+                "metadata": {"dataset": "MedQuAD", "type": "QA"}
+            })
+        return docs
+
+
+class WHOFetcher:
+    """Fetch WHO health topic guidelines (simulated)."""
+
+    GUIDELINES = [
+        {
+            "source": "WHO Guidelines",
+            "category": "Vaccination",
+            "question": "What vaccines are recommended by WHO for adults?",
+            "answer": (
+                "WHO recommends adult vaccinations including: influenza (annually), "
+                "COVID-19 (primary series + boosters), tetanus-diphtheria (every 10 years), "
+                "hepatitis B (if unvaccinated), MMR (measles-mumps-rubella, if no immunity), "
+                "HPV (up to age 26, or 27-45 for shared decision-making), "
+                "pneumococcal (65+), shingles (50+). Travel vaccines depend on destination."
+            )
+        },
+        {
+            "source": "WHO Guidelines",
+            "category": "Nutrition",
+            "question": "What are WHO dietary recommendations?",
+            "answer": (
+                "WHO dietary guidelines: eat ≥400g fruits/vegetables daily, limit free sugars "
+                "to <10% of energy intake (<5% for additional benefits), keep saturated fats "
+                "<10% of energy, eliminate industrial trans fats, limit sodium to <5g/day. "
+                "Eat whole grains, legumes, nuts, and lean proteins. Avoid ultra-processed foods. "
+                "Breastfeed infants exclusively for 6 months."
+            )
+        }
+    ]
+
+    def fetch(self) -> List[Dict]:
+        return [{"id": f"who_{i:03d}", **g} for i, g in enumerate(self.GUIDELINES)]
+
+
+
+
+
+class KnowledgeBaseUpdater:
+    """
+    Orchestrates periodic knowledge base updates from multiple sources.
+    Implements deduplication, validation, and scheduling.
+    """
+
+    def __init__(self, kb_path: str = "/tmp/medbot_kb_state.json"):
+        self.kb_path = Path(kb_path)
+        self.seen_ids: set = set()
+        self.total_docs: int = 12  # pre-seeded
+        self.update_history: List[Dict] = []
+        self._load_state()
+
+        self.fetchers = {
+            "MedQuAD Dataset": MedQuADFetcher(),
+            "PubMed RSS": PubMedFetcher(),
+            "WHO Updates": WHOFetcher(),
+        }
+
+    def _load_state(self):
+        """Load persisted state."""
+        if self.kb_path.exists():
+            try:
+                state = json.loads(self.kb_path.read_text())
+                self.seen_ids = set(state.get("seen_ids", []))
+                self.total_docs = state.get("total_docs", self.total_docs)
+                self.update_history = state.get("update_history", [])
+            except Exception:
+                pass
+
+    def _save_state(self):
+        """Persist state."""
+        try:
+            state = {
+                "seen_ids": list(self.seen_ids),
+                "total_docs": self.total_docs,
+                "update_history": self.update_history[-50:],
+                "last_saved": datetime.now().isoformat()
+            }
+            self.kb_path.write_text(json.dumps(state, indent=2))
+        except Exception:
+            pass
+
+    def _validate_document(self, doc: Dict) -> Tuple[bool, str]:
+        """Validate a document before adding."""
+        if not doc.get("question") or len(doc["question"]) < 10:
+            return False, "Question too short or missing"
+        if not doc.get("answer") or len(doc["answer"]) < 20:
+            return False, "Answer too short or missing"
+        if not doc.get("source"):
+            return False, "Source missing"
+        return True, "OK"
+
+    def _deduplicate(self, docs: List[Dict]) -> List[Dict]:
+        """Remove documents already in the knowledge base."""
+        new_docs = []
+        for doc in docs:
+            doc_id = doc.get("id") or hashlib.md5(
+                (doc.get("question", "") + doc.get("answer", "")).encode()
+            ).hexdigest()
+            doc["id"] = doc_id
+            if doc_id not in self.seen_ids:
+                new_docs.append(doc)
+        return new_docs
+
+    def update(self, selected_sources: List[str]) -> Tuple[List[str], Dict]:
+        """
+        Run knowledge base update from selected sources.
+        Returns: (log_messages, stats_dict)
+        """
+        logs = []
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        new_docs_count = 0
+        all_new_docs = []
+
+        logs.append(f"[{timestamp}] Starting KB update...")
+
+        for source_name in selected_sources:
+            fetcher = self.fetchers.get(source_name)
+            if not fetcher:
+                logs.append(f"[{timestamp}] ⚠ No fetcher for: {source_name}")
+                continue
+
+            logs.append(f"[{timestamp}] Fetching from {source_name}...")
+            try:
+                raw_docs = fetcher.fetch()
+                valid_docs = []
+                for doc in raw_docs:
+                    ok, reason = self._validate_document(doc)
+                    if ok:
+                        valid_docs.append(doc)
+                    else:
+                        logs.append(f"[{timestamp}] ✗ Skipped doc: {reason}")
+
+                new_docs = self._deduplicate(valid_docs)
+                all_new_docs.extend(new_docs)
+                for doc in new_docs:
+                    self.seen_ids.add(doc["id"])
+
+                logs.append(
+                    f"[{timestamp}] ✓ {source_name}: {len(new_docs)} new / "
+                    f"{len(raw_docs)} total fetched"
+                )
+                new_docs_count += len(new_docs)
+
+            except Exception as e:
+                logs.append(f"[{timestamp}] ✗ Error fetching {source_name}: {str(e)[:50]}")
+
+        self.total_docs += new_docs_count
+        self.update_history.append({
+            "timestamp": timestamp,
+            "sources": selected_sources,
+            "new_docs": new_docs_count,
+            "total_docs": self.total_docs
+        })
+        self._save_state()
+
+        logs.append(f"[{timestamp}] ✅ Update complete. +{new_docs_count} docs. Total: {self.total_docs}")
+
+        stats = {
+            "total_docs": self.total_docs,
+            "new_docs": new_docs_count,
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "sources": selected_sources,
+            "documents": all_new_docs  # For injection into chatbot engine
+        }
+        return logs, stats
+
+    def get_schedule_info(self, interval: str) -> str:
+        """Return human-readable schedule info."""
+        intervals = {
+            "Every hour": "Updates run every 60 minutes",
+            "Every 6 hours": "Updates run 4 times daily",
+            "Daily": "Updates run once at midnight",
+            "Manual": "Manual updates only"
+        }
+        return intervals.get(interval, "Manual updates only")
+
+    def get_update_history(self) -> List[Dict]:
+        return self.update_history
+
