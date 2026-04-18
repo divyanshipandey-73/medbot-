@@ -1,0 +1,388 @@
+
+MedBot Pro - Advanced Medical Q&A Chatbot with Dynamic Knowledge Base
+Combines: MedQuAD Dataset, ArXiv Papers, Sentiment Analysis, Dynamic KB Update
+
+import streamlit as st
+import time
+import json
+from datetime import datetime
+from core.chatbot import MedBotEngine
+from core.sentiment import SentimentAnalyzer
+from core.knowledge_updater import KnowledgeBaseUpdater
+from utils.entity_recognizer import MedicalEntityRecognizer
+from utils.helpers import format_response, get_sentiment_color
+
+
+st.set_page_config(
+    page_title="MedBot Pro",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'DM Sans', sans-serif;
+}
+
+.main { background: #0a0f1e; }
+
+.chat-bubble-user {
+    background: linear-gradient(135deg, #1a73e8, #0d47a1);
+    color: white;
+    padding: 12px 16px;
+    border-radius: 18px 18px 4px 18px;
+    margin: 8px 0;
+    max-width: 80%;
+    margin-left: auto;
+    font-size: 0.95rem;
+}
+
+.chat-bubble-bot {
+    background: #111827;
+    border: 1px solid #1f2937;
+    color: #e2e8f0;
+    padding: 14px 18px;
+    border-radius: 18px 18px 18px 4px;
+    margin: 8px 0;
+    max-width: 85%;
+    font-size: 0.95rem;
+    line-height: 1.6;
+}
+
+.sentiment-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+}
+
+.entity-tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    margin: 2px;
+    font-family: 'DM Mono', monospace;
+}
+
+.metric-card {
+    background: #111827;
+    border: 1px solid #1f2937;
+    border-radius: 12px;
+    padding: 16px;
+    margin: 8px 0;
+}
+
+.update-log {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+    padding: 12px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.78rem;
+    color: #58a6ff;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.stButton > button {
+    background: linear-gradient(135deg, #1a73e8, #0d47a1);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 20px;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
+}
+
+.source-chip {
+    background: #1e3a5f;
+    color: #93c5fd;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+    margin: 2px;
+    display: inline-block;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+if "engine" not in st.session_state:
+    st.session_state.engine = MedBotEngine()
+if "sentiment_analyzer" not in st.session_state:
+    st.session_state.sentiment_analyzer = SentimentAnalyzer()
+if "kb_updater" not in st.session_state:
+    st.session_state.kb_updater = KnowledgeBaseUpdater()
+if "entity_recognizer" not in st.session_state:
+    st.session_state.entity_recognizer = MedicalEntityRecognizer()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "update_logs" not in st.session_state:
+    st.session_state.update_logs = []
+if "kb_stats" not in st.session_state:
+    st.session_state.kb_stats = {"total_docs": 0, "last_updated": "Never", "sources": []}
+
+
+with st.sidebar:
+    st.markdown("## 🏥 MedBot Pro")
+    st.markdown("*AI-powered Medical Knowledge System*")
+    st.divider()
+
+    
+    st.markdown("### 📚 Knowledge Base")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        kb_docs = st.session_state.kb_stats.get("total_docs", 0)
+        st.metric("Documents", kb_docs)
+    with col2:
+        st.metric("Sources", len(st.session_state.kb_stats.get("sources", [])))
+
+    st.caption(f"Last updated: {st.session_state.kb_stats.get('last_updated', 'Never')}")
+
+    
+    st.markdown
+    sources = {
+        "MedQuAD Dataset": st.checkbox("MedQuAD", value=True),
+        "PubMed RSS": st.checkbox("PubMed RSS", value=True),
+        "ArXiv CS/Bio": st.checkbox("ArXiv Papers", value=False),
+        "WHO Updates": st.checkbox("WHO Guidelines", value=False),
+    }
+
+    update_interval = st.selectbox(
+        "Update Interval",
+        ["Manual", "Every hour", "Every 6 hours", "Daily"],
+        index=0
+    )
+
+    if st.button("🔄 Update Knowledge Base Now", use_container_width=True):
+        with st.spinner("Updating knowledge base..."):
+            selected = [k for k, v in sources.items() if v]
+            logs, stats = st.session_state.kb_updater.update(selected)
+            st.session_state.update_logs.extend(logs)
+            st.session_state.kb_stats = stats
+            st.success(f"✅ Added {stats.get('new_docs', 0)} new documents!")
+
+    st.divider()
+
+    
+    st.markdown("### 📋 Update Log")
+    if st.session_state.update_logs:
+        log_html = "<div class='update-log'>"
+        for log in st.session_state.update_logs[-10:]:
+            log_html += f"{log}<br>"
+        log_html += "</div>"
+        st.markdown(log_html, unsafe_allow_html=True)
+    else:
+        st.caption("No updates yet. Run an update above.")
+
+    st.divider()
+
+
+    st.markdown("### ⚙️ Settings")
+    show_entities = st.checkbox("Show Medical Entities", value=True)
+    show_sentiment = st.checkbox("Show Sentiment Analysis", value=True)
+    show_sources = st.checkbox("Show Retrieved Sources", value=True)
+    confidence_threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.5, 0.05)
+
+    st.divider()
+    if st.button("🗑️ Clear Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+
+st.markdown("# 🏥 MedBot Pro")
+st.markdown(
+    "Medical Q&A · Sentiment-Aware · Dynamic Knowledge Base · Entity Recognition"
+)
+
+# Tabs
+tab1, tab2, tab3 = st.tabs(["💬 Chat", "🔬 Paper Search", "📊 Analytics"])
+
+with tab1:
+    chat_container = st.container()
+    with chat_container:
+        if not st.session_state.messages:
+            st.markdown("""
+            <div style='text-align:center; padding: 60px 20px; color: #4b5563;'>
+                <div style='font-size: 3rem; margin-bottom: 16px;'>🏥</div>
+                <div style='font-size: 1.1rem; font-weight: 500; color: #9ca3af;'>
+                    Welcome to MedBot Pro
+                </div>
+                <div style='font-size: 0.9rem; margin-top: 8px; color: #6b7280;'>
+                    Ask any medical question — symptoms, diseases, treatments, or research papers.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            for msg in st.session_state.messages:
+                if msg["role"] == "user":
+                    st.markdown(
+                        f"<div class='chat-bubble-user'>{msg['content']}</div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    
+                    sentiment = msg.get("sentiment", {})
+                    entity_html = ""
+                    source_html = ""
+
+                    if show_sentiment and sentiment:
+                        label = sentiment.get("label", "neutral").upper()
+                        color = get_sentiment_color(sentiment.get("label", "neutral"))
+                        emoji = {"POSITIVE": "😊", "NEGATIVE": "😟", "NEUTRAL": "😐"}.get(label, "")
+                        st.markdown(
+                            f"<span class='sentiment-badge' style='background:{color}20; color:{color};'>"
+                            f"{emoji} {label} ({sentiment.get('score', 0):.0%})</span>",
+                            unsafe_allow_html=True
+                        )
+
+                    if show_entities and msg.get("entities"):
+                        entity_colors = {
+                            "DISEASE": "#7c3aed", "SYMPTOM": "#dc2626",
+                            "TREATMENT": "#059669", "DRUG": "#d97706",
+                            "ANATOMY": "#2563eb"
+                        }
+                        for ent in msg["entities"]:
+                            clr = entity_colors.get(ent["type"], "#6b7280")
+                            entity_html += (
+                                f"<span class='entity-tag' style='background:{clr}20; color:{clr};'>"
+                                f"{ent['text']} <small>{ent['type']}</small></span>"
+                            )
+                        if entity_html:
+                            st.markdown(entity_html, unsafe_allow_html=True)
+
+                    st.markdown(
+                        f"<div class='chat-bubble-bot'>{msg['content']}</div>",
+                        unsafe_allow_html=True
+                    )
+
+                    if show_sources and msg.get("sources"):
+                        for src in msg["sources"][:3]:
+                            source_html += (
+                                f"<span class='source-chip'>📄 {src}</span>"
+                            )
+                        if source_html:
+                            st.markdown(source_html, unsafe_allow_html=True)
+
+    st.divider()
+
+    with st.form("chat_form", clear_on_submit=True):
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            user_input = st.text_input(
+                "Ask a medical question...",
+                placeholder="e.g. What are the symptoms of Type 2 diabetes?",
+                label_visibility="collapsed"
+            )
+        with col2:
+            submitted = st.form_submit_button("Send →", use_container_width=True)
+
+    if submitted and user_input.strip():
+      
+        sentiment = st.session_state.sentiment_analyzer.analyze(user_input)
+
+        
+        entities = st.session_state.entity_recognizer.extract(user_input)
+
+        
+        st.session_state.messages.append({
+            "role": "user",
+            "content": user_input,
+            "sentiment": sentiment
+        })
+
+        
+        with st.spinner("Searching knowledge base..."):
+            response, sources, confidence = st.session_state.engine.answer(
+                user_input,
+                sentiment=sentiment,
+                entities=entities,
+                threshold=confidence_threshold
+            )
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": response,
+            "sentiment": sentiment,
+            "entities": entities,
+            "sources": sources,
+            "confidence": confidence
+        })
+        st.rerun()
+
+with tab2:
+    st.markdown("### 🔬 ArXiv Paper Search")
+    st.markdown("Search and explore scientific papers from ArXiv in computer science and biomedical fields.")
+
+    paper_query = st.text_input("Search papers...", placeholder="e.g. transformer models for medical diagnosis")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        domain = st.selectbox("Domain", ["All", "Computer Science", "Biology", "Medicine", "Statistics"])
+    with col2:
+        max_results = st.number_input("Max Results", 1, 20, 5)
+
+    if st.button("🔍 Search Papers"):
+        with st.spinner("Searching ArXiv..."):
+            papers = st.session_state.engine.search_papers(paper_query, domain, max_results)
+            if papers:
+                for paper in papers:
+                    with st.expander(f"📄 {paper['title'][:80]}..."):
+                        st.markdown(f"**Authors:** {paper.get('authors', 'N/A')}")
+                        st.markdown(f"**Published:** {paper.get('published', 'N/A')}")
+                        st.markdown(f"**Abstract:** {paper.get('abstract', 'N/A')[:400]}...")
+                        if paper.get("url"):
+                            st.markdown(f"[🔗 Read Full Paper]({paper['url']})")
+                        if st.button(f"Add to KB", key=paper.get("id", "")):
+                            st.success("Paper added to knowledge base!")
+            else:
+                st.info("No papers found. Try a different query.")
+
+with tab3:
+    st.markdown("### 📊 System Analytics")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Queries", len([m for m in st.session_state.messages if m["role"] == "user"]))
+    with col2:
+        pos = len([m for m in st.session_state.messages
+                   if m["role"] == "user" and m.get("sentiment", {}).get("label") == "positive"])
+        st.metric("Positive Sentiment", pos)
+    with col3:
+        neg = len([m for m in st.session_state.messages
+                   if m["role"] == "user" and m.get("sentiment", {}).get("label") == "negative"])
+        st.metric("Negative Sentiment", neg)
+    with col4:
+        st.metric("KB Documents", st.session_state.kb_stats.get("total_docs", 0))
+
+    st.divider()
+
+    if st.session_state.messages:
+        import pandas as pd
+        sentiments = [m.get("sentiment", {}).get("label", "neutral")
+                      for m in st.session_state.messages if m["role"] == "user"]
+        if sentiments:
+            counts = pd.Series(sentiments).value_counts()
+            st.bar_chart(counts)
+
+    st.markdown
+    all_entities = []
+    for m in st.session_state.messages:
+        all_entities.extend(m.get("entities", []))
+    if all_entities:
+        import pandas as pd
+        df = pd.DataFrame(all_entities)
+        st.dataframe(df.value_counts(["type", "text"]).reset_index().head(10),
+                     use_container_width=True)
+    else:
+        st.caption("No entities recognized yet. Start chatting!")
+
